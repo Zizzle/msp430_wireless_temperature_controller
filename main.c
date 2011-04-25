@@ -1,56 +1,71 @@
-  #include	<io.h>
+///////////////////////////////////////////////////////////////////////////////
+// MSP430 Launchpad based wireless temperature controller
+//
+// Apr 2011, Matt Pratt <mattpratt.au@gmail.com>
+//
+// MSP430 Launchpad connected to a DS18S20 1-wire thermometer, 2 relays,
+// and a bluetooth TTL wireless board.
+//
+// Used for controlling homebrew beer fermentation. One relay to be used to
+// control fridge compressor, the other heat belt. Some hysteresis is used.
+//
+// This temperature controller has no display. The setpoint temperature can
+// be set via bluetooth. Each second the current temperature is reported over
+// bluetooth.
+//
+// The MSP430G20xx does not contain an UART. This means that we must use a
+// bit-banged software UART. The bluetooth adapter expects 38400 baud by
+// default. To do this we run the MSP430 at 8MHz. So you will need to run
+// a calibration program to flash the correct DCO values.
+//
+///////////////////////////////////////////////////////////////////////////////
+#include   <io.h>
 #include   <signal.h>
-
-#define		TXD             BIT1    // TXD on P1.1
-#define		RXD		BIT2	// RXD on P1.2
-
-#define     	Bit_time    	208		// 38400 Baud, SMCLK=8MHz (1.0 / 38400) / (1.0 / 8000000) = 208.333
-#define		Bit_time_5	104		// Time for half a bit.
-
-unsigned char BitCnt;		// Bit count, used when transmitting byte
-unsigned int TXByte;		// Value sent over UART when Transmit() is called
-unsigned int RXByte;		// Value recieved once hasRecieved is set
-
-char isReceiving;		// Status for when the device is receiving
 
 #define false 0
 #define true  1
 
-// temperature stored in deci-degrees C
-int           temperature   = 0;
-short         target        = 1800;
-unsigned char Error         = 0;
-unsigned char ticks         = 0;
-char          line[20];
-int           line_pos      = 0;
-char          line_complete = 0;
-int           since_run     = 0;
-char          running       = 0;
+#define		TXD             BIT1    // TXD on P1.1
+#define		RXD		BIT2	// RXD on P1.2
+#define     	Bit_time    	208	// 38400 Baud, SMCLK=8MHz (1.0 / 38400) / (1.0 / 8000000) = 208.333
+#define		Bit_time_5	104	// Time for half a bit.
+unsigned char   BitCnt;		        // Bit count, used when transmitting byte
+unsigned int    TXByte;		        // Value sent over UART when Transmit() is called
+unsigned int    RXByte;		        // Value recieved once hasRecieved is set
+char            isReceiving;	        // Status for when the device is receiving
 
-#define HYSTERESIS 100  // 100 = 1 deg C
-#define TICKS_PER_SECOND 244
-#define COMPRESSOR_DELAY 60
+int             temperature   = 0;     // temperature stored in deci-degrees C (1000 = 10.00 deg C)
+short           target        = 1800;  // temperature stored in deci-degrees C (1000 = 10.00 deg C)
+unsigned char   Error         = 0;
+unsigned char   ticks         = 0;
+char            line[20];
+int             line_pos      = 0;
+char            line_complete = 0;
+int             since_run     = 0;
+char            running       = 0;
 
-#define FLASH_SEG_C 0x1040
-
-// Function Definitions
-void Transmit(void);
-
-#define RELAY_COOL BIT4
-#define RELAY_HEAT BIT3
+#define HYSTERESIS       100           // 100 = 1 deg C
+#define TICKS_PER_SECOND 244           // 8mhz MCLK / 32768 = 244
+#define COMPRESSOR_DELAY 600           // Wait 10 minutes minimum between cycling the compressor so we don't burn it out
+#define FLASH_SEG_C      0x1040
+#define RELAY_COOL       BIT4
+#define RELAY_HEAT       BIT3
 
 #define DQBIT BIT5
 #define DQ1 P1OUT |= DQBIT
 #define DQ0 P1OUT &=~ DQBIT
+
+// Function Definitions
+void Transmit(void);
 #define DelayNus(x) delay((x) * 8)
 
 // Delay Routine from mspgcc help file
 static void __inline__ delay(register unsigned int n)
 {
-  __asm__ __volatile__ (
-  "1: \n"
-  " dec %[n] \n"
-  " jne 1b \n"
+    __asm__ __volatile__ (
+	"1: \n"
+	" dec %[n] \n"
+	" jne 1b \n"
         : [n] "+r"(n));
 }
 
@@ -155,10 +170,10 @@ void DS1820ReadTemp(void)
     temp_low=Read_18B20(); 
     temp_high=Read_18B20();
 #if 1
-	Read_18B20(); // TH
-	Read_18B20(); // TL
-	Read_18B20(); // reserved
-	Read_18B20(); // reserved
+    Read_18B20(); // TH
+    Read_18B20(); // TL
+    Read_18B20(); // reserved
+    Read_18B20(); // reserved
     unsigned char remainder = Read_18B20(); // remaining count
 #endif
 
@@ -195,11 +210,12 @@ int atoi(char const* str)
 {
     int result = 0;
     char c;
-    while( (c = *str++) && c >= '0' && c <= '9' ) // for each non-NUL digit
+    while( (c = *str++) && c >= '0' && c <= '9' ) // for each non-NULL digit
 	result = result*10 + (c-'0'); // multiply previous result by 10
     return result;
 }
 
+// send a number out over the serial port
 void itoa(int number)
 {
     char result[8];
@@ -218,19 +234,21 @@ void itoa(int number)
 	i--;
     }
 }
+
+// Save the target temperature to Flash segment C
 void save_target()
 {
-  short *Flash_ptrC= (short *)FLASH_SEG_C;  // Initialize Flash segment C ptr 
-  FCTL3 = FWKEY;                            // Clear Lock bit 
-  FCTL1 = FWKEY + ERASE;                    // Set Erase bit 
-  SendString(" FLASH: ");
-  *Flash_ptrC = 0;                          // Dummy write to erase Flash seg C
-  itoa(FCTL3 & FAIL);
-  FCTL1 = FWKEY + WRT;                      // Set WRT bit for write operation 
-  *Flash_ptrC = target;  // save the target temp
-  itoa(FCTL3 & FAIL);
-  FCTL1 = FWKEY;                            // Clear WRT bit 
-  FCTL3 = FWKEY + LOCK;                     // Set LOCK bit 
+    short *Flash_ptrC= (short *)FLASH_SEG_C;  // Initialize Flash segment C ptr 
+    FCTL3 = FWKEY;                            // Clear Lock bit 
+    FCTL1 = FWKEY + ERASE;                    // Set Erase bit 
+    SendString(" FLASH: ");
+    *Flash_ptrC = 0;                          // Dummy write to erase Flash seg C
+    itoa(FCTL3 & FAIL);
+    FCTL1 = FWKEY + WRT;                      // Set WRT bit for write operation 
+    *Flash_ptrC = target;  // save the target temp
+    itoa(FCTL3 & FAIL);
+    FCTL1 = FWKEY;                            // Clear WRT bit 
+    FCTL3 = FWKEY + LOCK;                     // Set LOCK bit 
 }
 
 void process_line()
@@ -263,110 +281,111 @@ void compressor(char on)
     P1OUT &= ~RELAY_COOL;
 }
 
+// wake the mainloop every second
+interrupt(WDT_VECTOR) wdt_interrupt (void)
+{
+    ticks++;
+    if (ticks > TICKS_PER_SECOND)
+    {
+	ticks = 0;
+	__bic_SR_register_on_exit(CPUOFF);	// Enable CPU so the main while loop continues
+    }
+}
+
 void main(void)
 {
-	WDTCTL = WDTPW + WDTHOLD;		// Stop WDT
-
-	// Setup the watch dog as an interval timer
-	WDTCTL = WDT_MDLY_32;         // 
-	IE1 |= WDTIE;                 // enable interrupts for watchdog interval
+    // Setup the watch dog as an interval timer
+    WDTCTL = WDT_MDLY_32;         // 8mhz / 32768 = 244 HZ
+    IE1 |= WDTIE;                 // enable interrupts for watchdog interval
   
-	BCSCTL1 = CALBC1_8MHZ;			// Set range
-	DCOCTL  = CALDCO_8MHZ;			// SMCLK = DCO = 8MHz  
+    BCSCTL1 = CALBC1_8MHZ;			// Set range
+    DCOCTL  = CALDCO_8MHZ;			// SMCLK = DCO = 8MHz  
+    FCTL2   = FWKEY + FSSEL1 + FN4;         // Flash clock = 8MHz / 2^4+1 = 470kHz
 
-	FCTL2 = FWKEY + FSSEL1 + FN1;
+    P1SEL |= TXD;
+    P1DIR |= TXD | RELAY_COOL | RELAY_HEAT;
+    P1OUT = 0;
 
-	P1SEL |= TXD;
-	P1DIR |= TXD | RELAY_COOL | RELAY_HEAT;
-
-	P1OUT = 0;
-
-	P1IES |= RXD;				// RXD Hi/lo edge interrupt
-	P1IFG &= ~RXD;				// Clear RXD (flag) before enabling interrupt
-	P1IE |= RXD;				// Enable RXD interrupt
+    P1IES |= RXD;				// RXD Hi/lo edge interrupt
+    P1IFG &= ~RXD;				// Clear RXD (flag) before enabling interrupt
+    P1IE |= RXD;				// Enable RXD interrupt
+    isReceiving = false;			// Set initial values
   
-	isReceiving = false;			// Set initial values
-  
-	__bis_SR_register(GIE);			// interrupts enabled
+    __bis_SR_register(GIE);			// interrupts enabled
 
-	target = *((short *)FLASH_SEG_C);
-	if (target < 100 || target > 2500)
-	    target = 1800;
+    // load the target from Flash. If it looks invalid then default to 18 deg C.
+    target = *((short *)FLASH_SEG_C);
+    if (target < 100 || target > 2500)
+	target = 1800;
   
-	SendString("Wireless temp controller\r\n");
-
-	while(1)
+    SendString("Wireless temp controller\r\n");
+    while(1)
+    {
+	if (line_complete)
 	{
-	    if (line_complete)
-	    {
-		line[line_pos] = 0;
-		process_line();
-		line_pos = 0;
-		line_complete = 0;
-	    }
-	    else
-	    {
-		DS1820ReadTemp();
-
-		char on = temperature > target + (running ? -HYSTERESIS : HYSTERESIS);
-
-		itoa(temperature);
-		SendString(",target=");
-		itoa(target);
-		SendString(",err=");
-		itoa(Error);
-		SendString(",on=");
-		itoa(on);
-		SendString(",delay=");
-		itoa(on && since_run < COMPRESSOR_DELAY ? COMPRESSOR_DELAY - since_run : 0); 
-		SendString("\r\n");
-
-		compressor(!Error && on);
-
-		// kick of a convert for next time
-		DS1820Init();
-		DS1820Skip();
-		DS1820Convert();
-
-	    }
-	    __bis_SR_register(CPUOFF + GIE);        
-	    // LPM0, the ADC interrupt will wake the processor up. This is so that it does not
-	    //	endlessly loop when no value has been Received.
+	    line[line_pos] = 0;
+	    process_line();
+	    line_pos = 0;
+	    line_complete = 0;
 	}
+	else
+	{
+	    DS1820ReadTemp();
+	    char on = temperature > target + (running ? -HYSTERESIS : HYSTERESIS);
+
+	    itoa(temperature);
+	    SendString(",target=");	    itoa(target);
+	    SendString(",err=");	    itoa(Error);
+	    SendString(",on="); 	    itoa(on);
+	    SendString(",delay=");	    itoa(on && since_run < COMPRESSOR_DELAY ? COMPRESSOR_DELAY - since_run : 0); 
+	    SendString("\r\n");
+
+	    compressor(!Error && on);
+
+	    // kick off a convert for next time
+	    DS1820Init();
+	    DS1820Skip();
+	    DS1820Convert();
+	}
+	__bis_SR_register(CPUOFF + GIE);  // sleep waiting for a character or timer wakeup
+    }
 }
+
+///////////////////////////////////////////////////////////////////////////////
+// Software based UART from here on
 
 // Function Transmits Character from TXByte 
 void Transmit()
 { 
-	while(isReceiving);			// Wait for RX completion
-  	CCTL0 = OUT;				// TXD Idle as Mark
-  	TACTL = TASSEL_2 + MC_2;		// SMCLK, continuous mode
+    while(isReceiving);			// Wait for RX completion
+    CCTL0 = OUT;				// TXD Idle as Mark
+    TACTL = TASSEL_2 + MC_2;		// SMCLK, continuous mode
 
-  	BitCnt = 0xA;				// Load Bit counter, 8 bits + ST/SP
-  	CCR0 = TAR;				// Initialize compare register
+    BitCnt = 0xA;				// Load Bit counter, 8 bits + ST/SP
+    CCR0 = TAR;				// Initialize compare register
   
-  	CCR0 += Bit_time;			// Set time till first bit
-  	TXByte |= 0x100;			// Add stop bit to TXByte (which is logical 1)
-  	TXByte = TXByte << 1;			// Add start bit (which is logical 0)
+    CCR0 += Bit_time;			// Set time till first bit
+    TXByte |= 0x100;			// Add stop bit to TXByte (which is logical 1)
+    TXByte = TXByte << 1;			// Add start bit (which is logical 0)
   
-  	CCTL0 =  CCIS0 + OUTMOD0 + CCIE;	// Set signal, intial value, enable interrupts
-  	while ( CCTL0 & CCIE );			// Wait for previous TX completion
+    CCTL0 =  CCIS0 + OUTMOD0 + CCIE;	// Set signal, intial value, enable interrupts
+    while ( CCTL0 & CCIE );			// Wait for previous TX completion
 }
 
 // Port 1 interrupt service routine
 interrupt(PORT1_VECTOR) Port_1(void)
 {  	
-	isReceiving = true;
+    isReceiving = true;
 	
-	P1IE &= ~RXD;			// Disable RXD interrupt
-	P1IFG &= ~RXD;			// Clear RXD IFG (interrupt flag)
+    P1IE &= ~RXD;			// Disable RXD interrupt
+    P1IFG &= ~RXD;			// Clear RXD IFG (interrupt flag)
 	
-  	TACTL = TASSEL_2 + MC_2;	// SMCLK, continuous mode
-  	CCR0 = TAR + Bit_time_5;			// Initialize compare register + Set time till first bit
-	CCTL0 = OUTMOD1 + CCIE;		// Dissable TX and enable interrupts
+    TACTL = TASSEL_2 + MC_2;	// SMCLK, continuous mode
+    CCR0 = TAR + Bit_time_5;			// Initialize compare register + Set time till first bit
+    CCTL0 = OUTMOD1 + CCIE;		// Dissable TX and enable interrupts
 	
-	RXByte = 0;			// Initialize RXByte
-	BitCnt = 0x9;			// Load Bit counter, 8 bits + ST
+    RXByte = 0;			// Initialize RXByte
+    BitCnt = 0x9;			// Load Bit counter, 8 bits + ST
 }
 
 // Timer A0 interrupt service routine
@@ -407,16 +426,15 @@ interrupt(TIMERA0_VECTOR)  Timer_A (void)
 		RXByte = RXByte >> 2;		// Remove start bit
 		RXByte &= 0xFF;			// Remove stop bit
 
-		if (RXByte == '\n' || RXByte == '\r')
+		if (RXByte == '\n' || RXByte == '\r') // do we have a full line
 		{
 		    line_complete = 1;
-		    __bic_SR_register_on_exit(CPUOFF);	// Enable CPU so the main while loop continues
+		    __bic_SR_register_on_exit(CPUOFF);	// Wake the main loop
 		}
 		else if (!line_complete && line_pos < sizeof(line))
 		{
 		    line[line_pos++] = RXByte;
 		    TXByte = RXByte;	// Load the recieved byte into the byte to be transmitted
-//		    Transmit();
 		}
 	    }
 	}
@@ -427,17 +445,5 @@ interrupt(TIMERA0_VECTOR)  Timer_A (void)
 	    RXByte = RXByte >> 1;			// Shift the bits down
 	    BitCnt --;
 	}
-    }
-}
-
-interrupt(WDT_VECTOR) wdt_interrupt (void)
-{
-    ticks++;
-
-    // wake the mainloop every second
-    if (ticks > TICKS_PER_SECOND)
-    {
-	ticks = 0;
-	__bic_SR_register_on_exit(CPUOFF);	// Enable CPU so the main while loop continues
     }
 }
